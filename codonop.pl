@@ -16,7 +16,7 @@ use Data::Dumper;
 #   CAPITAN:        Andres Breton, http://andresbreton.com
 #   FILE:           codonop.pl
 #   LICENSE:        GNU GPLv2
-#   USAGE:
+#   USAGE:          Optimize codons according to codon usage
 #   DEPENDENCIES:   - BioPerl
 #                   - Modules
 #
@@ -25,77 +25,67 @@ use Data::Dumper;
 
 #-------------------------------------------------------------------------------
 # COMMAND LINE
-my (@DNA, @RNA, $TABLE, $OUTFMT );
+my (@SEQS, $TABLE, $OUTFMT );
 
 my $USAGE = "\n\n$0 [options]\n
 Options:
-  -dna          DNA sequence file(s)
-  -rna          RNA sequence file(s)
-  -table        Codon usage table
-  -outfmt       Output format in DNA (default) or RNA [optional]
-  -help         Shows this message
+  -seqs           Sequence file(s)
+  -table          Codon usage table
+  -outfmt         Output format in DNA (default) or RNA [optional]
+  -help           Shows this message
 \n";
 
 # OPTIONS
 GetOptions(
-  'dna=s{,}'      =>\@DNA,
-  'rna=s{,}'      =>\@RNA,
+  'seqs=s{,}'     =>\@SEQS,
   'table:s'       =>\$TABLE,
   'outfmt:s'      =>\$OUTFMT,
   # ''            =>\,
   help            =>sub{pod2usage($USAGE);}
 )or pod2usage(2);
 
-# checks(); # check CL arguments
+checks(); # check CL arguments
 
 #-------------------------------------------------------------------------------
 # VARIABLES
-my (%SEQS, %optimized);
-$SEQS{'DNA'} = \@DNA;
-$SEQS{'RNA'} = \@RNA;
+my (%optimizedSeqs);
+# push @SEQS, @DNA, @RNA;
+# $SEQS{'DNA'} = \@DNA;
+# $SEQS{'RNA'} = \@RNA;
 
 
 #-------------------------------------------------------------------------------
 # CALLS
+my $codonUT = parseTable($TABLE);
 
+foreach my $sequence (@SEQS){ # loop all sequence files
+  my $inSeqIO   = Bio::SeqIO->new( -file => $sequence );
 
+  while ( my $seqObj = $inSeqIO->next_seq) { # loop all sequences in file
+    my $displayID = $seqObj->display_id;
+    print "Optimizing $displayID ";
+    # my $protObj = $seq->translate;
+    # my $prot = $protObj->seq;
 
-foreach my $type (keys %SEQS) {
-  my $codonUT = parseTable($TABLE);
-  say "$type input sequence(s):";
-# say join(",", keys $codonUT);
-
-  my @SEQS = @{ $SEQS{$type} };
-  foreach my $sequence (@SEQS){ # loop all sequence files
-    my $inSeqIO   = Bio::SeqIO->new( -file => $sequence );
-
-    while ( my $seqObj = $inSeqIO->next_seq) { # loop all sequences in file
-      my $displayID = $seqObj->display_id;
-      say "Optimizing $displayID";
-      # my $protObj = $seq->translate;
-      # my $prot = $protObj->seq;
-
-      my $optSeq = optimize($codonUT, $seqObj, $OUTFMT);
-
-  exit;
-      $optimized{$displayID} = $optSeq;
-    }
+    my $optSeq = optimize($codonUT, $seqObj, $OUTFMT);
+    $optimizedSeqs{$displayID} = $optSeq;
+  }
 }
-exit;
+# say Dumper(\%optimizedSeqs);
 
-
-
-# say Dumper(\%optimized);
-}
 
 #-------------------------------------------------------------------------------
 # SUBS
-# sub checks {
-#   unless ($TABLE) {
-#     die "Need to provide both sequence and codon usage table files.";
-#   }
-#
-# }
+
+
+sub checks {
+  unless ($TABLE) {
+    die "Need to provide both sequence and codon usage table files.";
+  }
+
+}
+
+
 
 sub parseTable {
   my ($table) = @_;
@@ -113,68 +103,93 @@ sub parseTable {
     my $number = $5;
 
     $codons{$codon} = {
-                    'aa'          => $aa,
-                    'fraction'    => $fraction,
-                    'frequency'   => $frequency,
-                    'number'      => $number,
-                  };
+                        'aa'          => $aa,
+                        'fraction'    => $fraction,
+                        'frequency'   => $frequency,
+                        'number'      => $number,
+                      };
   }
+
   return(\%codons);
 }
 
+
+
 sub optimize {
   my ($codonUT, $seqObj, $OUTFMT) = @_;
-  my @optSeq;
+
+  my (%codons, @optSeq);
+  my %codonUT = %$codonUT;
   my $seq     = uc $seqObj->seq;
   my $seqLen  = $seqObj->length;
-  my $type    = $seqObj->alphabet;
+  my $type    = uc $seqObj->alphabet;
+
+  say $type, " sequence";
 
   # Traverse through sequence &
   # Get best codon according to usage table
   for (my $i = 0; $i < $seqLen;) {
     my $codon = substr $seq, $i, 3;
-# say "Using codon $codon ---";
 
-    $codon = getCodon($codonUT, $codon, $type);
-    if (!$OUTFMT) {
-      $codon =~ s/U/T/g;
+    # DNA input must be replaced to RNA's codon usage table
+    $codon =~ s/T/U/g if ($type eq 'DNA');
+    my $aa = $codonUT{$codon}{'aa'};
+
+    # Performance Boost
+    # Check if AA already stored with best codon identified
+    if ( exists $codons{$aa} ) {
     } else {
-      lc $OUTFMT eq 'dna' ? $codon =~ s/U/T/g : 0;
+      $codon = getCodon($codonUT, $aa);
+      $codons{$aa} = $codon;
     }
+
+    # Make codon correct alphabet (DNA/RNA) for output
+    if (!$OUTFMT) {
+      $codon =~ s/U/T/g; # DNA default
+    } else {
+      uc $OUTFMT eq 'DNA' ? $codon =~ s/U/T/g : 0; # DNA or leave as RNA?
+    }
+
     push @optSeq, $codon;
     $i = $i + 3;
   }
 
-  return \@optSeq;
+  return(\@optSeq);
 }
 
+
+
 sub getCodon {
-  my ($codonUT, $codon, $type) = @_;
+  my ($codonUT, $aa) = @_;
+
   my %codonUT = %$codonUT;
-  $codon =~ s/T/U/g if ($type eq 'dna');
-
-  my @triplets = keys %codonUT;
-  my $aa = $codonUT{$codon}{'aa'};
-
-
-  my @AAcodons = grep { $codonUT{$_}{'aa'} eq $aa } @triplets;
-# say "$codon -> $aa";
-# say "\tFound: ", join(",", @AAcodons);
-# print "\n\nFor AA '$aa' ($codon): ";
-  my $best = 0;
   my ($fraction, $ultimate);
-  foreach (@AAcodons) {
+  my $best = 0;
+
+  # Get all codons in usage table for specified AA
+  my @codonsAA = getCodonsAA($codonUT, $aa);
+
+  # Get ultimate best codon for specific AA
+  # For now, best == codon with greatest fraction used for AA
+  foreach (@codonsAA) {
     $fraction = $codonUT{$_}{'fraction'};
-# say "$codonUT{$codon}{'aa'} -> $codon";
-# print "\nBest fraction is $best";
-# print "\n\t'$_' --- ...found fraction: $fraction ";
     if($fraction > $best) {
       $best = $fraction;
-# print "\tbest is now $best";
-      $ultimate = $_; # best codon for specific AA
+      $ultimate = $_;
     }
   }
-  # $optimized{$aa} = $ultimate;
-# say "\nUltimate: $ultimate";
-  return $ultimate;
+
+  return($aa, $ultimate);
+}
+
+
+
+sub getCodonsAA {
+  my ($codonUT, $aa) = @_;
+
+  my %codonUT   = %$codonUT;
+  my @triplets  = keys %codonUT;
+  my @codonsAA  = grep { $codonUT{$_}{'aa'} eq $aa } @triplets;
+
+  return(@codonsAA);
 }
